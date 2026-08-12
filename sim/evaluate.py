@@ -4,10 +4,12 @@ Reports the geodesic attitude error -- the single rotation angle separating the
 estimate from truth -- rather than per-axis Euler differences, which exaggerate
 error near vertical and are not a distance.
 
-Tilt error is reported separately from total error because a 6-DOF IMU cannot
-observe yaw. Total error will grow without bound as yaw drifts; tilt error is
-the part the sensor set can actually be held responsible for, and it is the
-number to compare filters on.
+Tilt and heading error are reported separately, because which of them a filter
+can be held responsible for depends on its sensors. A 6-DOF IMU cannot observe
+yaw at all -- gravity is unchanged by rotation about the vertical -- so its
+heading error grows without bound and only tilt is meaningful. Adding a
+magnetometer makes heading observable, and then total error is the number to
+compare on.
 """
 
 import argparse
@@ -55,6 +57,22 @@ def gravity_in_body(quats):
     ])
 
 
+def heading(quats):
+    """Yaw in radians, the rotation about world +z."""
+    w, x, y, z = quats.T
+    return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def heading_error(estimate, truth):
+    """Signed yaw difference, wrapped to +/- pi.
+
+    Wrapping is not cosmetic: an estimate at +179 and a truth at -179 differ by
+    2 degrees, and the unwrapped subtraction would report 358.
+    """
+    delta = heading(estimate) - heading(truth)
+    return np.arctan2(np.sin(delta), np.cos(delta))
+
+
 def tilt_error(estimate, truth):
     up_estimate = gravity_in_body(estimate)
     up_truth = gravity_in_body(truth)
@@ -75,6 +93,7 @@ def summarize(name, truth_rows, estimate_rows, settle_fraction=0.2):
 
     total = np.degrees(geodesic_error(estimate, truth))
     tilt = np.degrees(tilt_error(estimate, truth))
+    yaw = np.degrees(np.abs(heading_error(estimate, truth)))
 
     return {
         "name": name,
@@ -82,6 +101,9 @@ def summarize(name, truth_rows, estimate_rows, settle_fraction=0.2):
         "tilt_rms": float(np.sqrt(np.mean(tilt[start:] ** 2))),
         "tilt_max": float(np.max(tilt[start:])),
         "tilt_final": float(tilt[-1]),
+        "yaw_rms": float(np.sqrt(np.mean(yaw[start:] ** 2))),
+        "yaw_final": float(yaw[-1]),
+        "total_rms": float(np.sqrt(np.mean(total[start:] ** 2))),
         "total_final": float(total[-1]),
         "settle_tilt": float(np.sqrt(np.mean(tilt[:start] ** 2))) if start else 0.0,
         "bias": (float(estimate_rows["bx"][-1]),
@@ -97,7 +119,7 @@ def main():
     parser.add_argument("--runner", default=None,
                         help="compiled bench/run_filter executable")
     parser.add_argument("--filter", default="complementary",
-                        choices=["complementary", "ekf"])
+                        choices=["complementary", "ekf", "ekf9"])
     args = parser.parse_args()
 
     here = pathlib.Path(__file__).parent
@@ -116,6 +138,7 @@ def main():
     estimates.write_text(result.stdout, encoding="utf-8")
 
     stats = summarize(args.filter, load_csv(data), load_csv(estimates))
+    observes_yaw = args.filter == "ekf9"
 
     print(f"\n  {data.name}  ({stats['samples']:,} samples)")
     print(f"  {'-' * 58}")
@@ -123,8 +146,11 @@ def main():
     print(f"    tilt error, RMS steady-state   {stats['tilt_rms']:8.3f} deg")
     print(f"    tilt error, worst              {stats['tilt_max']:8.3f} deg")
     print(f"    tilt error, final              {stats['tilt_final']:8.3f} deg")
-    print(f"    total error, final             {stats['total_final']:8.3f} deg"
-          f"   (includes unobservable yaw)")
+    print(f"    yaw error, RMS steady-state    {stats['yaw_rms']:8.3f} deg"
+          f"{'' if observes_yaw else '   (unobservable without a magnetometer)'}")
+    print(f"    yaw error, final               {stats['yaw_final']:8.3f} deg")
+    print(f"    total error, RMS steady-state  {stats['total_rms']:8.3f} deg")
+    print(f"    total error, final             {stats['total_final']:8.3f} deg")
     print(f"    convergence-window tilt RMS    {stats['settle_tilt']:8.3f} deg")
     print(f"    estimated gyro bias            "
           f"{stats['bias'][0]:+.4f} {stats['bias'][1]:+.4f} "

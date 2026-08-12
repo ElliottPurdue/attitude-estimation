@@ -35,6 +35,8 @@ void ekf_init(ekf_filter *filter)
     filter->accel_tolerance = EKF_ACCEL_TOL;
     filter->gravity = EKF_GRAVITY_G;
     filter->max_bias = EKF_MAX_BIAS;
+    filter->mag_noise = EKF_DEFAULT_MAG_NOISE;
+    filter->mag_min_horizontal = EKF_MIN_HORIZONTAL;
 
     /* Initial uncertainty: attitude unknown to about a radian, bias to a few
      * degrees per second. Starting too confident would make the filter reject
@@ -225,14 +227,155 @@ void ekf_update(ekf_filter *filter, vec3 gyro, vec3 accel, float dt)
     mat_symmetrize(filter->P, N);
 }
 
+/* Wraps an angle to [-pi, pi].
+ *
+ * Essential for a heading innovation: an estimate at 179 degrees and a
+ * measurement at -179 are two degrees apart, not 358. Unwrapped, that error
+ * would drive a correction the long way round the circle every time the estimate
+ * crossed the discontinuity.
+ */
+static float wrap_pi(float angle)
+{
+    const float two_pi = 6.28318530717958647692f;
+    const float pi = 3.14159265358979323846f;
+
+    while (angle > pi) {
+        angle -= two_pi;
+    }
+    while (angle < -pi) {
+        angle += two_pi;
+    }
+    return angle;
+}
+
+void ekf_update_magnetometer(ekf_filter *filter, vec3 mag)
+{
+    float magnitude = vec3_norm(mag);
+    if (magnitude < 1e-9f) {
+        return;
+    }
+
+    /* Rotated into the world frame with the current estimate. If the estimate
+     * were perfect and the environment clean, this vector's horizontal part
+     * would point along +x by definition of the world frame. */
+    vec3 world = quat_rotate(filter->orientation, vec3_scale(mag, 1.0f / magnitude));
+
+    /* Only the horizontal component carries heading. Discarding the vertical
+     * part is what stops the field's dip angle -- steep at high latitudes --
+     * from being read as a heading error. */
+    float horizontal = sqrtf(world.x * world.x + world.y * world.y);
+    if (horizontal < filter->mag_min_horizontal) {
+        return;     /* no usable heading in this reading */
+    }
+
+    /* Innovation: how far the estimate's idea of magnetic north sits from +x. */
+    float innovation = wrap_pi(-atan2f(world.y, world.x));
+
+    /* Measurement Jacobian.
+     *
+     * Heading is a rotation about the WORLD vertical, but this filter's error
+     * state is a rotation in the BODY frame -- see the injection below, which
+     * right-multiplies. A body error dtheta produces a world rotation R*dtheta,
+     * and the measurement sees only its vertical component, so
+     *
+     *     dpsi = z_world . (R dtheta) = (R^T z_world) . dtheta
+     *
+     * making H over the attitude block the world vertical expressed in body
+     * coordinates -- the same direction the accelerometer measures. It reduces
+     * to [0 0 1] only while level, which is why getting this wrong survives any
+     * test that never tilts the sensor.
+     *
+     * H is still rank one, so the update stays scalar: no matrix inverse and no
+     * 6x6 products beyond the covariance step. */
+    vec3 h = quat_rotate_inverse(filter->orientation, vec3_make(0.0f, 0.0f, 1.0f));
+
+    /* PH = P H^T, and variance = H P H^T + R. */
+    float PH[N];
+    for (int i = 0; i < N; ++i) {
+        PH[i] = MAT_AT(filter->P, N, i, 0) * h.x +
+                MAT_AT(filter->P, N, i, 1) * h.y +
+                MAT_AT(filter->P, N, i, 2) * h.z;
+    }
+
+    float variance = PH[0] * h.x + PH[1] * h.y + PH[2] * h.z +
+                     filter->mag_noise * filter->mag_noise;
+    if (variance < 1e-12f) {
+        return;
+    }
+
+    float gain[N];
+    for (int i = 0; i < N; ++i) {
+        gain[i] = PH[i] / variance;
+    }
+
+    filter->orientation = quat_normalize(quat_multiply(
+        filter->orientation,
+        quat_from_rotation_vector(vec3_make(gain[0] * innovation,
+                                            gain[1] * innovation,
+                                            gain[2] * innovation))));
+
+    filter->gyro_bias = vec3_make(
+        filter->gyro_bias.x + gain[3] * innovation,
+        filter->gyro_bias.y + gain[4] * innovation,
+        filter->gyro_bias.z + gain[5] * innovation);
+
+    /* Joseph form again, for the same reason: P = (I-KH)P(I-KH)^T + KRK^T. KH is
+     * the outer product of the gain with H, so only its first three columns are
+     * populated. */
+    float KH[N * N], IKH[N * N], temp[N * N], JP[N * N];
+    mat_zero(KH, N, N);
+    for (int i = 0; i < N; ++i) {
+        MAT_AT(KH, N, i, 0) = gain[i] * h.x;
+        MAT_AT(KH, N, i, 1) = gain[i] * h.y;
+        MAT_AT(KH, N, i, 2) = gain[i] * h.z;
+    }
+    mat_identity(IKH, N);
+    mat_sub(IKH, KH, IKH, N, N);
+
+    mat_mul(IKH, filter->P, temp, N, N, N);
+    mat_mul_bt(temp, IKH, JP, N, N, N);
+
+    float mag_variance = filter->mag_noise * filter->mag_noise;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            MAT_AT(JP, N, i, j) += gain[i] * mag_variance * gain[j];
+        }
+    }
+
+    mat_copy(filter->P, JP, N, N);
+    mat_symmetrize(filter->P, N);
+}
+
+/* Variance of the attitude error about a given body-frame axis. */
+static float variance_about(const ekf_filter *filter, vec3 axis)
+{
+    float a[3] = { axis.x, axis.y, axis.z };
+    float total = 0.0f;
+
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            total += a[i] * MAT_AT(filter->P, N, i, j) * a[j];
+        }
+    }
+    return total > 0.0f ? total : 0.0f;
+}
+
+/* Yaw is rotation about the world vertical, so its variance is the attitude
+ * covariance projected onto that axis in body coordinates -- not P[2][2], which
+ * is the variance about the body's own z and coincides with yaw only while
+ * level. Tilt takes the rest of the attitude block: whatever uncertainty is not
+ * about the vertical is uncertainty the accelerometer can see. */
 float ekf_tilt_sigma(const ekf_filter *filter)
 {
-    float variance = MAT_AT(filter->P, N, 0, 0) + MAT_AT(filter->P, N, 1, 1);
+    float trace = MAT_AT(filter->P, N, 0, 0) + MAT_AT(filter->P, N, 1, 1) +
+                  MAT_AT(filter->P, N, 2, 2);
+    vec3 up = quat_rotate_inverse(filter->orientation, vec3_make(0.0f, 0.0f, 1.0f));
+    float variance = trace - variance_about(filter, up);
     return sqrtf(variance > 0.0f ? variance : 0.0f);
 }
 
 float ekf_yaw_sigma(const ekf_filter *filter)
 {
-    float variance = MAT_AT(filter->P, N, 2, 2);
-    return sqrtf(variance > 0.0f ? variance : 0.0f);
+    vec3 up = quat_rotate_inverse(filter->orientation, vec3_make(0.0f, 0.0f, 1.0f));
+    return sqrtf(variance_about(filter, up));
 }

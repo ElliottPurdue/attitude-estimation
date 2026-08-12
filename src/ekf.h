@@ -22,7 +22,9 @@
  * The same caveat as every 6-DOF filter applies: gravity is invariant under
  * rotation about the vertical, so yaw is unobservable and its variance grows
  * without bound. The filter reports that honestly in P rather than pretending
- * to a heading it cannot have.
+ * to a heading it cannot have. Supplying a magnetometer through
+ * ekf_update_magnetometer removes the limitation; without one, treat the
+ * heading as arbitrary and use tilt only.
  */
 
 #ifndef EKF_H
@@ -49,6 +51,15 @@ typedef struct {
     float accel_tolerance;  /* fractional gate on |accel| vs gravity */
     float gravity;          /* magnitude at rest, in the caller's units */
     float max_bias;         /* rad/s, symmetric clamp */
+
+    /* Heading measurement noise, radians. Larger than the accelerometer's
+     * angular equivalent because magnetic environments are rarely clean. */
+    float mag_noise;
+
+    /* Rejects a reading whose horizontal projection is too short to give a
+     * reliable heading. Near the magnetic poles, or when a disturbance cancels
+     * the horizontal component, the direction of a near-zero vector is noise. */
+    float mag_min_horizontal;
 } ekf_filter;
 
 #define EKF_DEFAULT_GYRO_NOISE   0.01f
@@ -57,6 +68,12 @@ typedef struct {
 #define EKF_ACCEL_TOL            0.15f
 #define EKF_GRAVITY_G            1.0f
 #define EKF_MAX_BIAS             0.35f
+#define EKF_DEFAULT_MAG_NOISE    0.09f    /* rad, about 5 degrees */
+#define EKF_MIN_HORIZONTAL       0.10f    /* fraction of the field's magnitude */
+
+/* World frame convention: +z is up, and +x is the horizontal direction of the
+ * local magnetic field. Yaw is therefore measured from magnetic north, and true
+ * heading is that plus the local declination, which is the caller's business. */
 
 void ekf_init(ekf_filter *filter);
 
@@ -66,6 +83,28 @@ void ekf_init(ekf_filter *filter);
 void ekf_set_from_accel(ekf_filter *filter, vec3 accel);
 
 void ekf_update(ekf_filter *filter, vec3 gyro, vec3 accel, float dt);
+
+/* Corrects heading from a magnetometer. Call after ekf_update, at whatever rate
+ * the sensor provides; it does not integrate and needs no timestep.
+ *
+ * Corrects YAW ONLY, deliberately. The obvious implementation treats the
+ * magnetometer as a three-axis direction measurement like the accelerometer, but
+ * that lets every magnetic disturbance -- a motor, a speaker, a steel desk --
+ * pull on roll and pitch, which the accelerometer already determines well. Hard
+ * and soft iron errors are common and gravity is not, so the sensors should not
+ * be given equal authority over the same states.
+ *
+ * Instead the reading is rotated into the world frame using the current
+ * estimate, projected onto the horizontal plane, and reduced to a single heading
+ * angle. The measurement is scalar, and its Jacobian is the world vertical in
+ * body coordinates, so every correction it produces is a rotation about that
+ * vertical -- which is what heading means. Roll and pitch cannot move.
+ *
+ * The horizontal projection is also what makes this work at any attitude: it is
+ * the tilt compensation a bare compass lacks, using the tilt the filter already
+ * knows.
+ */
+void ekf_update_magnetometer(ekf_filter *filter, vec3 mag);
 
 /* One-sigma tilt uncertainty in radians, from the attitude block of P.
  * Useful for asserting that the filter's own confidence is calibrated. */

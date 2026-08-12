@@ -94,6 +94,20 @@ void setup()
     }
     report("ekf", micros() - start, sizeof(ekf_filter));
 
+    /* The same loop plus heading correction, so the difference between the two
+     * rows is what the magnetometer costs on this core. */
+    rng_state = 1u;
+    start = micros();
+    for (int i = 0; i < ITERATIONS; ++i) {
+        vec3 gyro = vec3_make(noise(0.5f), noise(0.5f), noise(0.5f));
+        vec3 accel = vec3_make(noise(0.05f), noise(0.05f), 1.0f + noise(0.05f));
+        vec3 mag = vec3_make(0.5f + noise(0.02f), noise(0.02f),
+                             -0.87f + noise(0.02f));
+        ekf_update(&ekf, gyro, accel, DT);
+        ekf_update_magnetometer(&ekf, mag);
+    }
+    report("ekf + mag", micros() - start, sizeof(ekf_filter));
+
     /* Printed so the optimiser cannot discard the loops as dead code. */
     Serial.printf("\n  (final states: %.6f  %.6f)\n",
                   comp.orientation.w, ekf.orientation.w);

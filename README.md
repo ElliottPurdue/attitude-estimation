@@ -1,7 +1,7 @@
 # Attitude Estimation in C
 
-Quaternion attitude estimation from a 6-DOF IMU, written in dependency-free C99
-for microcontrollers, and validated against synthetic trajectories with known
+Quaternion attitude estimation from a 6- or 9-DOF IMU, written in dependency-free
+C99 for microcontrollers, and validated against synthetic trajectories with known
 ground truth.
 
 The point of the simulator is that ground truth exists. On hardware you can watch
@@ -19,18 +19,18 @@ and estimated gravity directions.
 
 | Motion | Complementary | EKF | |
 |---|---|---|---|
-| static | 0.407° | **0.140°** | 2.9x |
-| gentle | 0.568° | **0.148°** | 3.8x |
-| aggressive | 0.789° | **0.264°** | 3.0x |
+| static | 0.402° | **0.130°** | 3.1x |
+| gentle | 0.576° | **0.135°** | 4.3x |
+| aggressive | 0.789° | **0.250°** | 3.2x |
 
-Worst-case tilt error follows the same pattern: 0.97°/1.34°/1.61° against
-0.44°/0.40°/0.65°.
+Worst-case tilt error follows the same pattern: 0.98°/1.27°/1.58° against
+0.32°/0.33°/0.51°.
 
 Gyro bias, gentle profile, against a true `(0.020, -0.015, 0.010)`:
 
 ```
-complementary   +0.0172  -0.0120  +0.0093
-EKF             +0.0196  -0.0155  +0.0101
+complementary   +0.0173  -0.0115  +0.0092
+EKF             +0.0199  -0.0147  +0.0101
 ```
 
 The complementary filter's fixed gain has to compromise between converging
@@ -38,6 +38,35 @@ quickly and rejecting noise. The EKF re-derives that tradeoff every step from it
 own covariance, leaning on the accelerometer while uncertain and largely ignoring
 it once confident — which is worth roughly a factor of three, and near-exact bias
 recovery rather than a systematic 15% shortfall.
+
+### Heading, with and without a magnetometer
+
+Yaw RMS error over the same runs. The 6-DOF columns are open-loop integration
+with nothing to correct them, so their values are not accuracy figures so much as
+a record of how far each drifted before the run ended.
+
+| Motion | Complementary | EKF | EKF + magnetometer |
+|---|---|---|---|
+| static | 22.1° | 63.1° | **0.17°** |
+| gentle | 12.0° | 19.9° | **0.32°** |
+| aggressive | 5.8° | 11.2° | **0.46°** |
+
+**Tilt accuracy is unchanged** — 0.130°/0.134°/0.250° against the 6-DOF EKF's
+0.130°/0.135°/0.250°, a difference of one thousandth of a degree on one profile
+and nothing at all on the other two. That is the design goal, not a
+coincidence: the magnetometer update is scalar and its Jacobian points along the
+world vertical, so every correction it can produce is a rotation about that
+vertical. It is arithmetically incapable of moving roll or pitch, and a
+disturbance test asserts it.
+
+The z-axis gyro bias is the clearest evidence that the heading is now genuinely
+observed rather than merely constrained. On the static profile, against a true
+`+0.0100` rad/s:
+
+```
+EKF                  +0.0343     3.4x the true value, and still moving
+EKF + magnetometer   +0.0099
+```
 
 ### Gyro bias observability depends on motion
 
@@ -69,22 +98,45 @@ leaves the state alone, which here is the better failure mode. Neither filter is
 wrong; the sensor set is incomplete, and the fix is a magnetometer, not a better
 estimator.
 
+Adding one confirms the diagnosis. The same EKF, same tuning, same log, with a
+heading measurement supplied: the z-bias estimate goes from `+0.0343` to
+`+0.0099` against a true `+0.0100`. Nothing about the estimator changed — the
+missing information was the whole problem.
+
 ### Cost, and the tradeoff it forces
 
 Measured on the host, and cross-compiled for the ESP32-S3 to size it:
 
 | | us/update | Max rate | State | Flash (Xtensa) |
 |---|---|---|---|---|
-| complementary | 0.210 | 4.76 MHz | 48 B | 586 B |
-| EKF | 4.045 | 247 kHz | 196 B | 1,554 B |
+| complementary | 0.20 | ~5 MHz | 48 B | 1,160 B |
+| EKF | 4.02 | 249 kHz | 204 B | 3,762 B |
+| EKF + magnetometer | 5.51 | 182 kHz | 204 B | (same object) |
 
-**The EKF costs 19x the compute and 4x the RAM for roughly 3x the accuracy.**
+**The EKF costs 20x the compute and 4x the RAM for roughly 3x the accuracy.**
 Whether that is worth paying depends entirely on the loop rate and the processor,
 which is the point of measuring rather than assuming.
 
-The whole library is **5.9 KB of flash and zero static RAM** on the ESP32-S3 --
+Heading correction adds 1.45 us per cycle, about 36% of the accelerometer update,
+and no state at all — the two extra floats in the struct are tuning parameters.
+It is cheaper than the accelerometer update because the measurement is scalar:
+a 1x1 innovation and a rank-one gain, so there is no matrix inverse. Most
+magnetometers also run far slower than the gyro, so in practice the update is
+called at a fraction of the loop rate and the amortised cost is lower still.
+
+The whole library is **7.2 KB of flash and zero static RAM** on the ESP32-S3 --
 no `.data`, no `.bss`, because there is no global state and nothing is
 dynamically allocated. Every filter's state lives in a struct the caller owns.
+Quaternion and matrix code accounts for the remaining 2.4 KB and is shared.
+
+Flash figures are `.text` per object file, built `-Os` with
+`xtensa-esp32s3-elf-gcc`, before the linker discards unused functions -- so they
+are an upper bound on what a sketch using only one filter would pay:
+
+```
+xtensa-esp32s3-elf-gcc -std=c99 -Os -mlongcalls -c src/*.c
+xtensa-esp32s3-elf-size -t *.o
+```
 
 `bench/esp32s3_bench/` is an Arduino sketch that runs the same measurement on
 device, for the number that actually decides whether either filter fits a given
@@ -95,16 +147,31 @@ The host benchmark binary is named `bench_cost` rather than anything containing
 auto-elevates executables matching *update*, *setup*, *install* or *patch* -- the
 original name failed to run with "requires elevation" on an ordinary shell.
 
-### What this sensor set cannot do
+### What each sensor set cannot do
 
 Gravity is invariant under rotation about the vertical, so **a 6-DOF IMU carries
 no yaw information at all.** Yaw is integrated open-loop and drifts without
-bound. Correcting it requires a magnetometer or an external heading reference.
+bound. This is a property of the sensors, not a shortcoming of the algorithm, and
+the test suite asserts it (`test_yaw_is_not_observable_from_a_six_dof_imu`)
+rather than hiding it. Reported metrics separate the observable part (tilt) from
+the total, so the drift is visible rather than buried in an average.
 
-This is a property of the sensors, not a shortcoming of the algorithm, and the
-test suite asserts it (`test_yaw_is_not_observable_from_a_six_dof_imu`) rather
-than hiding it. Reported metrics separate the observable part (tilt) from the
-total, so the yaw drift is visible rather than buried in an average.
+A magnetometer removes that limitation and introduces different ones:
+
+- **It measures magnetic north, not true north.** Everything here is relative to
+  the local field. Converting to true heading needs the local declination, which
+  depends on where on Earth you are and is the caller's business.
+- **Hard and soft iron distortion is not handled.** The simulator models sensor
+  noise only. A real magnetometer needs calibration against the fixed offset from
+  nearby ferrous material and the ellipsoidal scaling from field warping, and an
+  uncalibrated one has a heading error that varies with orientation — exactly the
+  signature that looks like a filter bug.
+- **A sustained disturbance degrades heading**, and the filter cannot tell it
+  from a real rotation. It gates on the horizontal projection being long enough
+  to carry a heading, which catches the field being cancelled or the sensor
+  sitting near a magnetic pole, but a motor that merely bends the field will be
+  believed. Roll and pitch stay correct throughout, which is the point of the
+  scalar formulation.
 
 ### Accelerometer rejection
 
@@ -134,6 +201,18 @@ initial `acos` implementation reported **exactly zero** for rotations of 1e-6 an
 1e-4 rad — it could not resolve small angles at all, which is the entire job of
 an attitude error metric. Caught by the test suite before it reached the filters.
 
+**The measurement Jacobian lives in the error state's frame.** The heading
+measurement is a rotation about the *world* vertical, but the error state is a
+rotation in the *body* frame, so H over the attitude block is the world vertical
+expressed in body coordinates — not `[0 0 1]`. Getting this wrong is invisible
+while level, where the two are the same vector, and the first nine magnetometer
+tests all passed with the wrong version because they held the attitude near
+level. The simulator caught it immediately: tilt error went from 0.14° to 10.6°
+and the y-bias estimate ran into its clamp. `test_tracks_heading_through_a_tumble`
+now pins it, and it has to be a *moving* test — at a fixed attitude even a wrong
+gain direction eventually nulls the innovation, so a static test converges and
+reports success.
+
 **Float, not double.** On a Cortex-M or Xtensa core with a single-precision FPU,
 doubles are emulated in software at roughly an order of magnitude more cost per
 operation — the difference between closing a 1 kHz loop and not.
@@ -149,7 +228,7 @@ the C filters to the Python harness.
 ```
 src/        vec3.h  quaternion.{h,c}  matrix.{h,c}            the library
             complementary.{h,c}  ekf.{h,c}
-tests/      37 tests, no framework                            host only
+tests/      47 tests, no framework                            host only
 sim/        generate.py  evaluate.py                          truth + scoring
 bench/      run_filter.c  bench_cost.c                       CSV driver, timing
             esp32s3_bench/                                     on-device sketch
@@ -160,32 +239,35 @@ bench/      run_filter.c  bench_cost.c                       CSV driver, timing
 Requires a C99 compiler and `make`. Python 3 with NumPy for the simulator.
 
 ```
-make test                     # 37 tests
+make test                     # 47 tests
 make bench                    # build the CSV driver
 make time                     # per-update cost and memory footprint
 
 python sim/generate.py --profile gentle --duration 60 --rate 200
 python sim/evaluate.py --filter complementary
 python sim/evaluate.py --filter ekf
+python sim/evaluate.py --filter ekf9      # EKF with the magnetometer
 ```
 
-`generate.py` takes `--gyro-bias`, `--gyro-noise`, `--accel-noise` and
-`--linear-accel` to sweep sensor quality, and three motion profiles.
+`generate.py` takes `--gyro-bias`, `--gyro-noise`, `--accel-noise`,
+`--linear-accel`, `--mag-noise` and `--dip` to sweep sensor quality and magnetic
+environment, and three motion profiles.
 
 ---
 
 ## Status
 
 Working: quaternion algebra, complementary (Mahony-style) filter, a
-multiplicative EKF over a 6-element error state, fixed-size matrix arithmetic,
-simulation harness, error scoring, 37 tests.
+multiplicative EKF over a 6-element error state, scalar magnetometer heading
+correction, fixed-size matrix arithmetic, simulation harness, error scoring,
+47 tests.
 
 Cross-compiles clean for the ESP32-S3 at 5.9 KB flash and zero static RAM.
 `bench/esp32s3_bench/` measures per-update cost on device; the figures in the
 cost table above are from the host.
 
-Possible next steps: a magnetometer update to make yaw observable, and a control
-law on top of the estimator to make it a complete GNC stack.
+Possible next steps: hard and soft iron calibration, and a control law on top of
+the estimator to make it a complete GNC stack.
 
 ## License
 

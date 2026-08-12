@@ -70,8 +70,24 @@ int main(void)
     }
     double ekf_seconds = seconds_now() - start;
 
+    /* The same loop plus a magnetometer update, so the difference between the
+     * two rows is the cost of heading correction rather than a separate
+     * measurement of it. */
+    rng_state = 1u;
+    start = seconds_now();
+    for (int i = 0; i < ITERATIONS; ++i) {
+        vec3 gyro = vec3_make(noise(0.5f), noise(0.5f), noise(0.5f));
+        vec3 accel = vec3_make(noise(0.05f), noise(0.05f), 1.0f + noise(0.05f));
+        vec3 mag = vec3_make(0.5f + noise(0.02f), noise(0.02f),
+                             -0.87f + noise(0.02f));
+        ekf_update(&ekf, gyro, accel, DT);
+        ekf_update_magnetometer(&ekf, mag);
+    }
+    double ekf9_seconds = seconds_now() - start;
+
     double comp_us = comp_seconds * 1e6 / ITERATIONS;
     double ekf_us = ekf_seconds * 1e6 / ITERATIONS;
+    double ekf9_us = ekf9_seconds * 1e6 / ITERATIONS;
 
     printf("  %-16s %10s %14s %12s\n", "filter", "us/update", "max rate", "state bytes");
     printf("  %s\n", "------------------------------------------------------");
@@ -81,10 +97,17 @@ int main(void)
     printf("  %-16s %10.3f %11.0f Hz %12u\n", "ekf", ekf_us,
            ekf_us > 0.0 ? 1e6 / ekf_us : 0.0,
            (unsigned)sizeof(ekf_filter));
+    printf("  %-16s %10.3f %11.0f Hz %12u\n", "ekf + mag", ekf9_us,
+           ekf9_us > 0.0 ? 1e6 / ekf9_us : 0.0,
+           (unsigned)sizeof(ekf_filter));
 
     if (comp_us > 0.0) {
         printf("\n  the EKF costs %.1fx the complementary filter per update\n",
                ekf_us / comp_us);
+    }
+    if (ekf_us > 0.0) {
+        printf("  heading correction adds %.3f us, %.0f%% of the accel update\n",
+               ekf9_us - ekf_us, 100.0 * (ekf9_us - ekf_us) / ekf_us);
     }
 
     /* Prevents the optimiser discarding the loops as dead code. */
