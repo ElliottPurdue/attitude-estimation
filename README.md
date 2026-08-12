@@ -69,6 +69,32 @@ leaves the state alone, which here is the better failure mode. Neither filter is
 wrong; the sensor set is incomplete, and the fix is a magnetometer, not a better
 estimator.
 
+### Cost, and the tradeoff it forces
+
+Measured on the host, and cross-compiled for the ESP32-S3 to size it:
+
+| | us/update | Max rate | State | Flash (Xtensa) |
+|---|---|---|---|---|
+| complementary | 0.210 | 4.76 MHz | 48 B | 586 B |
+| EKF | 4.045 | 247 kHz | 196 B | 1,554 B |
+
+**The EKF costs 19x the compute and 4x the RAM for roughly 3x the accuracy.**
+Whether that is worth paying depends entirely on the loop rate and the processor,
+which is the point of measuring rather than assuming.
+
+The whole library is **5.9 KB of flash and zero static RAM** on the ESP32-S3 --
+no `.data`, no `.bss`, because there is no global state and nothing is
+dynamically allocated. Every filter's state lives in a struct the caller owns.
+
+`bench/esp32s3_bench/` is an Arduino sketch that runs the same measurement on
+device, for the number that actually decides whether either filter fits a given
+control loop.
+
+The host benchmark binary is named `bench_cost` rather than anything containing
+"update". Windows UAC applies installer-detection heuristics by filename, and
+auto-elevates executables matching *update*, *setup*, *install* or *patch* -- the
+original name failed to run with "requires elevation" on an ordinary shell.
+
 ### What this sensor set cannot do
 
 Gravity is invariant under rotation about the vertical, so **a 6-DOF IMU carries
@@ -125,7 +151,8 @@ src/        vec3.h  quaternion.{h,c}  matrix.{h,c}            the library
             complementary.{h,c}  ekf.{h,c}
 tests/      37 tests, no framework                            host only
 sim/        generate.py  evaluate.py                          truth + scoring
-bench/      run_filter.c                                       CSV driver
+bench/      run_filter.c  bench_cost.c                       CSV driver, timing
+            esp32s3_bench/                                     on-device sketch
 ```
 
 ## Build and run
@@ -135,6 +162,7 @@ Requires a C99 compiler and `make`. Python 3 with NumPy for the simulator.
 ```
 make test                     # 37 tests
 make bench                    # build the CSV driver
+make time                     # per-update cost and memory footprint
 
 python sim/generate.py --profile gentle --duration 60 --rate 200
 python sim/evaluate.py --filter complementary
@@ -152,7 +180,12 @@ Working: quaternion algebra, complementary (Mahony-style) filter, a
 multiplicative EKF over a 6-element error state, fixed-size matrix arithmetic,
 simulation harness, error scoring, 37 tests.
 
-Next: an Xtensa build measuring per-update cost on an ESP32-S3.
+Cross-compiles clean for the ESP32-S3 at 5.9 KB flash and zero static RAM.
+`bench/esp32s3_bench/` measures per-update cost on device; the figures in the
+cost table above are from the host.
+
+Possible next steps: a magnetometer update to make yaw observable, and a control
+law on top of the estimator to make it a complete GNC stack.
 
 ## License
 

@@ -20,8 +20,9 @@ TESTS   := $(wildcard tests/*.c)
 BUILD   := build
 TEST_BIN  := $(BUILD)/run_tests
 BENCH_BIN := $(BUILD)/run_filter
+TIME_BIN  := $(BUILD)/bench_cost
 
-.PHONY: all test bench clean
+.PHONY: all test bench time clean
 
 all: test
 
@@ -38,6 +39,12 @@ $(BENCH_BIN): $(SRC) bench/run_filter.c | $(BUILD)
 	$(CC) $(CFLAGS) $(SRC) bench/run_filter.c -o $@ $(LDFLAGS)
 
 bench: $(BENCH_BIN)
+
+$(TIME_BIN): $(SRC) bench/bench_cost.c | $(BUILD)
+	$(CC) $(CFLAGS) $(SRC) bench/bench_cost.c -o $@ $(LDFLAGS)
+
+time: $(TIME_BIN)
+	@./$(TIME_BIN)
 
 clean:
 	@rm -rf $(BUILD)
