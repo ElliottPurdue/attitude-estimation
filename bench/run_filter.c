@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "../src/complementary.h"
+#include "../src/ekf.h"
 
 #define MAX_LINE 512
 
@@ -37,8 +38,8 @@ static int parse_line(const char *line, sample *out)
 int main(int argc, char **argv)
 {
     const char *path = (argc > 1) ? argv[1] : NULL;
-    float kp = (argc > 2) ? (float)atof(argv[2]) : COMPLEMENTARY_DEFAULT_KP;
-    float ki = (argc > 3) ? (float)atof(argv[3]) : COMPLEMENTARY_DEFAULT_KI;
+    const char *which = (argc > 2) ? argv[2] : "complementary";
+    int use_ekf = (which[0] == 'e');
 
     FILE *input = path ? fopen(path, "r") : stdin;
     if (!input) {
@@ -52,8 +53,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    complementary_filter filter;
-    complementary_init(&filter, kp, ki);
+    complementary_filter comp;
+    ekf_filter ekf;
+    complementary_init(&comp, COMPLEMENTARY_DEFAULT_KP, COMPLEMENTARY_DEFAULT_KI);
+    ekf_init(&ekf);
 
     printf("t,qw,qx,qy,qz,bx,by,bz\n");
 
@@ -72,20 +75,28 @@ int main(int argc, char **argv)
          * identity, so the run measures steady-state accuracy instead of a
          * convergence transient that would dominate a short log. */
         if (!initialised) {
-            complementary_set_from_accel(&filter, current.accel);
+            if (use_ekf) {
+                ekf_set_from_accel(&ekf, current.accel);
+            } else {
+                complementary_set_from_accel(&comp, current.accel);
+            }
             initialised = 1;
         }
 
         if (have_previous) {
             float dt = current.t - previous.t;
-            complementary_update(&filter, current.gyro, current.accel, dt);
+            if (use_ekf) {
+                ekf_update(&ekf, current.gyro, current.accel, dt);
+            } else {
+                complementary_update(&comp, current.gyro, current.accel, dt);
+            }
         }
 
+        quat q = use_ekf ? ekf.orientation : comp.orientation;
+        vec3 b = use_ekf ? ekf.gyro_bias : comp.gyro_bias;
+
         printf("%.6f,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
-               current.t,
-               filter.orientation.w, filter.orientation.x,
-               filter.orientation.y, filter.orientation.z,
-               filter.gyro_bias.x, filter.gyro_bias.y, filter.gyro_bias.z);
+               current.t, q.w, q.x, q.y, q.z, b.x, b.y, b.z);
 
         previous = current;
         have_previous = 1;
@@ -96,6 +107,7 @@ int main(int argc, char **argv)
         fclose(input);
     }
 
-    fprintf(stderr, "processed %ld samples (kp=%g ki=%g)\n", count, kp, ki);
+    fprintf(stderr, "processed %ld samples with the %s filter\n",
+            count, use_ekf ? "ekf" : "complementary");
     return 0;
 }

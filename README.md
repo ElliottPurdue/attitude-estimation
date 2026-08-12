@@ -14,38 +14,60 @@ error is measurable.
 ## Results
 
 60 seconds at 200 Hz, gyro bias `(0.020, -0.015, 0.010)` rad/s, gyro noise
-0.01 rad/s, accelerometer noise 0.02 g.
+0.01 rad/s, accelerometer noise 0.02 g. Tilt error is the angle between the true
+and estimated gravity directions.
 
-| Motion profile | Tilt RMS | Tilt worst | Yaw drift @60s | z-bias estimated |
-|---|---|---|---|---|
-| static | **0.407°** | 0.967° | 34.6° | +0.0000 |
-| gentle | 0.568° | 1.344° | 15.2° | +0.0093 |
-| aggressive | 0.789° | 1.611° | **8.2°** | +0.0040 |
+| Motion | Complementary | EKF | |
+|---|---|---|---|
+| static | 0.407° | **0.140°** | 2.9x |
+| gentle | 0.568° | **0.148°** | 3.8x |
+| aggressive | 0.789° | **0.264°** | 3.0x |
 
-*(true z-bias is 0.010 rad/s)*
+Worst-case tilt error follows the same pattern: 0.97°/1.34°/1.61° against
+0.44°/0.40°/0.65°.
 
-**Tilt error** is the angle between the true and estimated gravity directions.
-**Yaw drift** is the unobservable remainder — see below.
+Gyro bias, gentle profile, against a true `(0.020, -0.015, 0.010)`:
+
+```
+complementary   +0.0172  -0.0120  +0.0093
+EKF             +0.0196  -0.0155  +0.0101
+```
+
+The complementary filter's fixed gain has to compromise between converging
+quickly and rejecting noise. The EKF re-derives that tradeoff every step from its
+own covariance, leaning on the accelerometer while uncertain and largely ignoring
+it once confident — which is worth roughly a factor of three, and near-exact bias
+recovery rather than a systematic 15% shortfall.
 
 ### Gyro bias observability depends on motion
 
 The static case has the best tilt accuracy and the *worst* yaw drift, and the
-z-axis bias is estimated as exactly zero. That is not a bug.
+complementary filter estimates its z-axis bias as exactly zero.
 
 The accelerometer correction is a cross product between measured and expected
 gravity. When the device is still, gravity lies along body-z, and the cross
-product of two nearly-parallel z-vectors has no z-component — so the integral
-term never sees evidence about z-bias and never learns it. Yaw then integrates
-the full uncorrected bias.
+product of two nearly-parallel z-vectors has no z-component — so nothing ever
+informs the z-bias. Yaw then integrates it uncorrected.
 
-Motion rotates gravity through the body frame, giving the correction a
-z-component and making the bias partially observable. Under aggressive motion
-yaw drift falls to 8.2°, a quarter of the static case, purely because the filter
-could finally see the bias it needed to cancel.
+Motion rotates gravity through the body frame and makes the bias partially
+observable. Yaw drift over 60 seconds falls from 34.6° when static to 8.2° under
+aggressive motion, purely because the filter could finally see what it needed to
+cancel.
 
-The tradeoff runs the other way for tilt: aggressive motion nearly doubles tilt
-RMS, because the correction spends its authority tracking the trajectory instead
-of settling.
+The EKF behaves differently and worse here, in an instructive way. Sensor noise
+jitters the attitude slightly off level, giving the measurement Jacobian a small
+non-zero yaw column, and the filter treats that noise-driven observability as
+real information: its z-bias estimate converges to a value that varies with the
+noise realization rather than toward the truth, while its stated variance shrinks.
+Adding bias process noise does not fix it — the sweep from 0 to 5e-2 rad/s²/√Hz
+changes the answer without improving it, because the problem is that the
+information is absent, not that the filter is over-weighting it.
+
+**A covariance filter can become confident about a quantity it cannot observe.**
+The complementary filter has no covariance to be confident with, so it simply
+leaves the state alone, which here is the better failure mode. Neither filter is
+wrong; the sensor set is incomplete, and the fix is a magnetometer, not a better
+estimator.
 
 ### What this sensor set cannot do
 
@@ -99,8 +121,9 @@ the C filters to the Python harness.
 ## Layout
 
 ```
-src/        vec3.h  quaternion.{h,c}  complementary.{h,c}     the library
-tests/      23 tests, no framework                            host only
+src/        vec3.h  quaternion.{h,c}  matrix.{h,c}            the library
+            complementary.{h,c}  ekf.{h,c}
+tests/      37 tests, no framework                            host only
 sim/        generate.py  evaluate.py                          truth + scoring
 bench/      run_filter.c                                       CSV driver
 ```
@@ -110,11 +133,12 @@ bench/      run_filter.c                                       CSV driver
 Requires a C99 compiler and `make`. Python 3 with NumPy for the simulator.
 
 ```
-make test                     # 23 tests
+make test                     # 37 tests
 make bench                    # build the CSV driver
 
 python sim/generate.py --profile gentle --duration 60 --rate 200
-python sim/evaluate.py
+python sim/evaluate.py --filter complementary
+python sim/evaluate.py --filter ekf
 ```
 
 `generate.py` takes `--gyro-bias`, `--gyro-noise`, `--accel-noise` and
@@ -124,11 +148,11 @@ python sim/evaluate.py
 
 ## Status
 
-Working: quaternion algebra, complementary (Mahony-style) filter with gyro bias
-estimation, simulation harness, error scoring, 23 tests.
+Working: quaternion algebra, complementary (Mahony-style) filter, a
+multiplicative EKF over a 6-element error state, fixed-size matrix arithmetic,
+simulation harness, error scoring, 37 tests.
 
-Next: an Extended Kalman Filter to compare against on the same harness, and an
-Xtensa build measuring per-update cost on an ESP32-S3.
+Next: an Xtensa build measuring per-update cost on an ESP32-S3.
 
 ## License
 

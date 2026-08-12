@@ -96,8 +96,8 @@ def main():
                         help="IMU log from generate.py")
     parser.add_argument("--runner", default=None,
                         help="compiled bench/run_filter executable")
-    parser.add_argument("--kp", type=float, default=1.0)
-    parser.add_argument("--ki", type=float, default=0.05)
+    parser.add_argument("--filter", default="complementary",
+                        choices=["complementary", "ekf"])
     args = parser.parse_args()
 
     here = pathlib.Path(__file__).parent
@@ -110,13 +110,12 @@ def main():
     if not runner.exists():
         sys.exit(f"no runner at {runner}; run make bench first")
 
-    result = subprocess.run([str(runner), str(data), str(args.kp), str(args.ki)],
+    result = subprocess.run([str(runner), str(data), args.filter],
                             capture_output=True, text=True, check=True)
-    estimates = here / "data" / f"{data.stem}_estimates.csv"
+    estimates = here / "data" / f"{data.stem}_{args.filter}.csv"
     estimates.write_text(result.stdout, encoding="utf-8")
 
-    stats = summarize(f"complementary kp={args.kp} ki={args.ki}",
-                      load_csv(data), load_csv(estimates))
+    stats = summarize(args.filter, load_csv(data), load_csv(estimates))
 
     print(f"\n  {data.name}  ({stats['samples']:,} samples)")
     print(f"  {'-' * 58}")
