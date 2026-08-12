@@ -1,0 +1,19 @@
+# Build output
+build/
+*.o
+*.exe
+*.elf
+
+# Generated simulation data; reproducible from sim/generate.py
+sim/data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+.DS_Store
