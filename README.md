@@ -36,7 +36,7 @@ EKF             +0.0199  -0.0147  +0.0101
 The complementary filter's fixed gain has to compromise between converging
 quickly and rejecting noise. The EKF re-derives that tradeoff every step from its
 own covariance, leaning on the accelerometer while uncertain and largely ignoring
-it once confident — which is worth roughly a factor of three, and near-exact bias
+it once confident. That is worth roughly a factor of three, plus near-exact bias
 recovery rather than a systematic 15% shortfall.
 
 ### Heading, with and without a magnetometer
@@ -51,7 +51,7 @@ a record of how far each drifted before the run ended.
 | gentle | 12.0° | 19.9° | **0.32°** |
 | aggressive | 5.8° | 11.2° | **0.46°** |
 
-**Tilt accuracy is unchanged** — 0.130°/0.134°/0.250° against the 6-DOF EKF's
+**Tilt accuracy is unchanged:** 0.130°/0.134°/0.250° against the 6-DOF EKF's
 0.130°/0.135°/0.250°, a difference of one thousandth of a degree on one profile
 and nothing at all on the other two. That is the design goal, not a
 coincidence: the magnetometer update is scalar and its Jacobian points along the
@@ -75,7 +75,7 @@ complementary filter estimates its z-axis bias as exactly zero.
 
 The accelerometer correction is a cross product between measured and expected
 gravity. When the device is still, gravity lies along body-z, and the cross
-product of two nearly-parallel z-vectors has no z-component — so nothing ever
+product of two nearly-parallel z-vectors has no z-component, so nothing ever
 informs the z-bias. Yaw then integrates it uncorrected.
 
 Motion rotates gravity through the body frame and makes the bias partially
@@ -88,7 +88,7 @@ jitters the attitude slightly off level, giving the measurement Jacobian a small
 non-zero yaw column, and the filter treats that noise-driven observability as
 real information: its z-bias estimate converges to a value that varies with the
 noise realization rather than toward the truth, while its stated variance shrinks.
-Adding bias process noise does not fix it — the sweep from 0 to 5e-2 rad/s²/√Hz
+Adding bias process noise does not fix it. The sweep from 0 to 5e-2 rad/s²/√Hz
 changes the answer without improving it, because the problem is that the
 information is absent, not that the filter is over-weighting it.
 
@@ -100,7 +100,7 @@ estimator.
 
 Adding one confirms the diagnosis. The same EKF, same tuning, same log, with a
 heading measurement supplied: the z-bias estimate goes from `+0.0343` to
-`+0.0099` against a true `+0.0100`. Nothing about the estimator changed — the
+`+0.0099` against a true `+0.0100`. Nothing about the estimator changed. The
 missing information was the whole problem.
 
 ### Cost, and the tradeoff it forces
@@ -118,7 +118,7 @@ Whether that is worth paying depends entirely on the loop rate and the processor
 which is the point of measuring rather than assuming.
 
 Heading correction adds 1.45 us per cycle, about 36% of the accelerometer update,
-and no state at all — the two extra floats in the struct are tuning parameters.
+and no state at all, since the two extra floats in the struct are tuning parameters.
 It is cheaper than the accelerometer update because the measurement is scalar:
 a 1x1 innovation and a rank-one gain, so there is no matrix inverse. Most
 magnetometers also run far slower than the gyro, so in practice the update is
@@ -164,7 +164,7 @@ A magnetometer removes that limitation and introduces different ones:
 - **Hard and soft iron distortion is not handled.** The simulator models sensor
   noise only. A real magnetometer needs calibration against the fixed offset from
   nearby ferrous material and the ellipsoidal scaling from field warping, and an
-  uncalibrated one has a heading error that varies with orientation — exactly the
+  uncalibrated one has a heading error that varies with orientation, the exact
   signature that looks like a filter bug.
 - **A sustained disturbance degrades heading**, and the filter cannot tell it
   from a real rotation. It gates on the horizontal projection being long enough
@@ -191,31 +191,31 @@ and mixing them silently inverts rotations while everything still looks
 self-consistent. Pinned by `test_ninety_degree_yaw_maps_x_to_y`.
 
 **Exact exponential map, not `q + 0.5·ω·q`.** The first-order approximation
-drifts off the unit sphere at a rate proportional to angular velocity — worst
+drifts off the unit sphere at a rate proportional to angular velocity, worst
 exactly when an estimator can least afford it. `test_integrating_many_small_steps_does_not_drift`
 integrates 4,000 steps into one full revolution and checks the residual.
 
 **The error metric uses `atan2`, not `acos`.** For float32, `acos(1-ε) ≈ √(2ε)`,
 so rounding alone puts a 0.04° floor under any small-angle measurement. The
 initial `acos` implementation reported **exactly zero** for rotations of 1e-6 and
-1e-4 rad — it could not resolve small angles at all, which is the entire job of
+1e-4 rad. It could not resolve small angles at all, which is the entire job of
 an attitude error metric. Caught by the test suite before it reached the filters.
 
 **The measurement Jacobian lives in the error state's frame.** The heading
 measurement is a rotation about the *world* vertical, but the error state is a
 rotation in the *body* frame, so H over the attitude block is the world vertical
-expressed in body coordinates — not `[0 0 1]`. Getting this wrong is invisible
+expressed in body coordinates, not `[0 0 1]`. Getting this wrong is invisible
 while level, where the two are the same vector, and the first nine magnetometer
 tests all passed with the wrong version because they held the attitude near
 level. The simulator caught it immediately: tilt error went from 0.14° to 10.6°
 and the y-bias estimate ran into its clamp. `test_tracks_heading_through_a_tumble`
-now pins it, and it has to be a *moving* test — at a fixed attitude even a wrong
+now pins it, and it has to be a *moving* test. At a fixed attitude even a wrong
 gain direction eventually nulls the innovation, so a static test converges and
 reports success.
 
 **Float, not double.** On a Cortex-M or Xtensa core with a single-precision FPU,
 doubles are emulated in software at roughly an order of magnitude more cost per
-operation — the difference between closing a 1 kHz loop and not.
+operation. That is the difference between closing a 1 kHz loop and not.
 
 **No dynamic allocation, no I/O in `src/`.** The library compiles unchanged for a
 microcontroller. File handling lives in `bench/`, which exists only to connect
